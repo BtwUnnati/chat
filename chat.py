@@ -1,9 +1,14 @@
 import time
 import sqlite3
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+)
 from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler,
+    ContextTypes
+)
 from config import BOT_TOKEN, START_PHOTO_URL, SUPPORT_LINK, UPDATES_LINK
 
 DB = "chatbot.db"
@@ -20,7 +25,7 @@ def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
-        user_id INTEGER, group_id INTEGER, username TEXT, msg_time INTEGER
+        user_id INTEGER, group_id INTEGER, group_name TEXT, username TEXT, msg_time INTEGER
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS usersettings (
         user_id INTEGER PRIMARY KEY,
@@ -39,28 +44,23 @@ def get_user_lang(user_id):
     return row[0] if row and row[0] in SUPPORTED_LANGS else 'en'
 
 def set_user_lang(user_id, lang):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
+    conn = sqlite3.connect(DB); c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO usersettings(user_id) VALUES (?)", (user_id,))
     c.execute("UPDATE usersettings SET language=? WHERE user_id=?", (lang, user_id))
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
 def get_user_gender(user_id):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT gender FROM usersettings WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    conn.close()
+    row = c.fetchone(); conn.close()
     return row[0] if row and row[0] in SUPPORTED_GENDERS else 'unspecified'
 
 def set_user_gender(user_id, gender):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
+    conn = sqlite3.connect(DB); c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO usersettings(user_id) VALUES (?)", (user_id,))
     c.execute("UPDATE usersettings SET gender=? WHERE user_id=?", (gender, user_id))
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
 def block_check(user_id):
     now = int(time.time())
@@ -77,20 +77,31 @@ def block_user(user_id, group_id, username, context=None, lang='en'):
 
 def count_messages_last(user_id, group_id, seconds=2):
     now = int(time.time())
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
+    conn = sqlite3.connect(DB); c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM messages WHERE user_id=? AND group_id=? AND msg_time>=?", (user_id, group_id, now-seconds))
     count = c.fetchone()[0]
-    conn.close()
-    return count
+    conn.close(); return count
 
-def add_message(user_id, group_id, username):
+def add_message(user_id, group_id, group_name, username):
     now = int(time.time())
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("INSERT INTO messages(user_id, group_id, username, msg_time) VALUES (?,?,?,?)", (user_id, group_id, username, now))
-    conn.commit()
+    c.execute("INSERT INTO messages(user_id, group_id, group_name, username, msg_time) VALUES (?,?,?,?,?)", (user_id, group_id, group_name, username, now))
+    conn.commit(); conn.close()
+
+def get_group_stats_list(user_id, since=None):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    qry = "SELECT group_name, COUNT(*) as mcount FROM messages WHERE user_id=?"
+    params = [user_id]
+    if since:
+        qry += " AND msg_time >= ?"
+        params.append(since)
+    qry += " GROUP BY group_id ORDER BY mcount DESC"
+    c.execute(qry, params)
+    data = c.fetchall()
     conn.close()
+    return data
 
 def get_leaderboard(group_id, since=None):
     conn = sqlite3.connect(DB)
@@ -118,19 +129,6 @@ def get_total_group_msgs(group_id, since=None):
     total = c.fetchone()[0]
     conn.close()
     return total
-
-def get_user_stats(user_id, since=None):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    query = "SELECT COUNT(*) FROM messages WHERE user_id=?"
-    params = [user_id]
-    if since:
-        query += " AND msg_time >= ?"
-        params.append(since)
-    c.execute(query, params)
-    val = c.fetchone()[0]
-    conn.close()
-    return val
 
 def _dt(mode):
     now = datetime.now()
@@ -168,7 +166,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ Add me in a group", url=f"https://t.me/{context.bot.username}?startgroup=true")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
-         InlineKeyboardButton("🏆 Your stats", callback_data="yourstats")],
+         InlineKeyboardButton("🏆 Your stats", callback_data="yourstats_overall")],
         [InlineKeyboardButton("❓ Support", url=SUPPORT_LINK),
          InlineKeyboardButton("🔔 Updates", url=UPDATES_LINK)]
     ]
@@ -179,7 +177,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=markup
     )
 
-# helper for photo/text edit fallback
 async def smart_edit_caption_or_text(query, caption, reply_markup=None, parse_mode=None):
     if getattr(query.message, "photo", None):
         await query.edit_message_caption(caption=caption, reply_markup=reply_markup, parse_mode=parse_mode)
@@ -192,7 +189,7 @@ async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🌐 Language", callback_data="setlang"),
          InlineKeyboardButton("🧑 Gender", callback_data="gender_menu")],
-        [InlineKeyboardButton(T("back", lang), callback_data="back")]
+        [InlineKeyboardButton(T("back", lang), callback_data="back_start")]
     ]
     msg = T("settings", lang)
     query = getattr(update, "callback_query", None)
@@ -231,7 +228,7 @@ async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_lang(user_id, code)
     kb = [
         [InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
-         InlineKeyboardButton("🏆 Your stats", callback_data="yourstats")]
+         InlineKeyboardButton("🏆 Your stats", callback_data="yourstats_overall")]
     ]
     msg = T("lang_set", code)
     await smart_edit_caption_or_text(cbq, msg, reply_markup=InlineKeyboardMarkup(kb))
@@ -244,28 +241,50 @@ async def set_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_gender(user_id, code)
     kb = [
         [InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
-         InlineKeyboardButton("🏆 Your stats", callback_data="yourstats")]
+         InlineKeyboardButton("🏆 Your stats", callback_data="yourstats_overall")]
     ]
     msg = T("gender_set", lang)
     await smart_edit_caption_or_text(cbq, msg, reply_markup=InlineKeyboardMarkup(kb))
 
-async def stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def stats_buttons(view):
+    btns = [
+        [
+            InlineKeyboardButton(f"🌟 Overall{' ✅' if view == 'overall' else ''}", callback_data="yourstats_overall"),
+            InlineKeyboardButton(f"📆 Today{' ✅' if view == 'today' else ''}", callback_data="yourstats_today"),
+        ],
+        [InlineKeyboardButton(f"📊 Week{' ✅' if view == 'week' else ''}", callback_data="yourstats_week")],
+        [InlineKeyboardButton("Back", callback_data="back_start")]
+    ]
+    return InlineKeyboardMarkup(btns)
+
+async def stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='overall', query=None):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     gender = SUPPORTED_GENDERS[get_user_gender(user_id)][lang]
-    overall = get_user_stats(user_id)
-    today = get_user_stats(user_id, _dt('today'))
-    week = get_user_stats(user_id, _dt('week'))
-    msg = (
-        f"<b>{T('stats_title', lang)}</b>\n"
-        f"{gender}\n"
-        f"\n<b>{T('overall', lang)}:</b>\n<i>Messages:</i> {overall}"
-        f"\n\n<b>{T('today', lang)}:</b>\n<i>Messages:</i> {today}"
-        f"\n\n<b>{T('week', lang)}:</b>\n<i>Messages:</i> {week}"
-    )
-    kb = [[InlineKeyboardButton(T("back", lang), callback_data="back")]]
-    query = update.callback_query
-    await smart_edit_caption_or_text(query, msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    since = _dt(mode)
+    rows = get_group_stats_list(user_id, since)
+    msg = f"<b>{T('stats_title', lang)}</b>\n{gender}\n\n"
+    if rows:
+        for idx, (gname, cnt) in enumerate(rows, 1):
+            msg += f"{idx}. 👫 <b>{gname}</b> • {cnt}\n"
+    else:
+        msg += T("no_data", lang)
+    markup = stats_buttons(mode)
+    if query:
+        await query.edit_message_media(InputMediaPhoto(START_PHOTO_URL, caption=msg, parse_mode='HTML'), reply_markup=markup)
+    else:
+        await update.message.reply_photo(
+            START_PHOTO_URL, caption=msg, reply_markup=markup, parse_mode='HTML'
+        )
+
+async def stats_buttons_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = update.callback_query.data
+    if data == "yourstats_overall":
+        await stats_menu(update, context, 'overall', query=update.callback_query)
+    elif data == "yourstats_today":
+        await stats_menu(update, context, 'today', query=update.callback_query)
+    elif data == "yourstats_week":
+        await stats_menu(update, context, 'week', query=update.callback_query)
 
 async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='overall', query=None):
     user_id = update.effective_user.id
@@ -275,9 +294,9 @@ async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='over
     board = get_leaderboard(group_id, since)
     total = get_total_group_msgs(group_id, since)
     btns = [
-        [InlineKeyboardButton("🌟 Overall", callback_data="lb_overall"),
-         InlineKeyboardButton("📆 Today", callback_data="lb_today")],
-        [InlineKeyboardButton("📊 Week", callback_data="lb_week")]
+        [InlineKeyboardButton(f"🌟 Overall{' ✅' if mode == 'overall' else ''}", callback_data="lb_overall"),
+         InlineKeyboardButton(f"📆 Today{' ✅' if mode == 'today' else ''}", callback_data="lb_today")],
+        [InlineKeyboardButton(f"📊 Week{' ✅' if mode == 'week' else ''}", callback_data="lb_week")]
     ]
     msg = f"📈 <b>LEADERBOARD</b>\n"
     if board:
@@ -294,52 +313,34 @@ async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='over
         msg += f"\n<b>Overall messages:</b> {total}"
     markup = InlineKeyboardMarkup(btns)
     if query:
-        await query.edit_message_media(
-            InputMediaPhoto(START_PHOTO_URL, caption=msg, parse_mode='HTML'),
-            reply_markup=markup
-        )
+        await query.edit_message_media(InputMediaPhoto(START_PHOTO_URL, caption=msg, parse_mode='HTML'), reply_markup=markup)
     else:
         await update.message.reply_photo(
-            START_PHOTO_URL, caption=msg,
-            reply_markup=markup, parse_mode='HTML'
+            START_PHOTO_URL, caption=msg, reply_markup=markup, parse_mode='HTML'
         )
 
 async def lb_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
+    data = update.callback_query.data
     if data == "lb_today":
-        await ranking(update, context, mode='today', query=query)
+        await ranking(update, context, mode='today', query=update.callback_query)
     elif data == "lb_week":
-        await ranking(update, context, mode='week', query=query)
+        await ranking(update, context, mode='week', query=update.callback_query)
     elif data == "lb_overall":
-        await ranking(update, context, mode='overall', query=query)
+        await ranking(update, context, mode='overall', query=update.callback_query)
 
 async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ranking(update, context, mode='overall')
 
 async def yourstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    lang = get_user_lang(user_id)
-    gender = SUPPORTED_GENDERS[get_user_gender(user_id)][lang]
-    overall = get_user_stats(user_id)
-    today = get_user_stats(user_id, _dt('today'))
-    week = get_user_stats(user_id, _dt('week'))
-    msg = (
-        f"<b>{T('stats_title', lang)}</b>\n"
-        f"{gender}\n"
-        f"\n<b>{T('overall', lang)}:</b>\n<i>Messages:</i> {overall}"
-        f"\n\n<b>{T('today', lang)}:</b>\n<i>Messages:</i> {today}"
-        f"\n\n<b>{T('week', lang)}:</b>\n<i>Messages:</i> {week}"
-    )
-    await update.message.reply_photo(
-        START_PHOTO_URL, caption=msg,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(T("back", lang), callback_data="back")]]),
-        parse_mode='HTML'
-    )
+    await stats_menu(update, context, 'overall')
 
 async def message_counter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    group_id = update.effective_chat.id
+    chat = update.effective_chat
+    if chat.type not in ["supergroup", "group"]:
+        return
+    group_id = chat.id
+    group_name = chat.title or "Private"
     user_id = user.id
     username = user.username or user.first_name
     lang = get_user_lang(user_id)
@@ -350,13 +351,15 @@ async def message_counter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msgc >= 10:
         block_user(user_id, group_id, username, context, lang)
         return
-    add_message(user_id, group_id, username)
+    add_message(user_id, group_id, group_name, username)
 
 async def inline_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cbq = update.callback_query
     data = cbq.data
-    if data in ["settings", "back"]:
+    if data in ["settings"]:
         await settings_menu(update, context)
+    elif data in ["back", "back_start"]:
+        await start(cbq, context)
     elif data == "setlang":
         await setlang_menu(update, context)
     elif data == "gender_menu":
@@ -365,8 +368,8 @@ async def inline_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await set_language(update, context)
     elif data.startswith("gender_"):
         await set_gender(update, context)
-    elif data == "yourstats":
-        await stats_menu(update, context)
+    elif data.startswith("yourstats_"):
+        await stats_buttons_router(update, context)
     elif data.startswith("lb_"):
         await lb_buttons(update, context)
 
