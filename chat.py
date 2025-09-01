@@ -1,4 +1,6 @@
-import time, sqlite3, asyncio
+import os
+import time
+import sqlite3
 from datetime import datetime, timedelta
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
@@ -22,15 +24,24 @@ SUPPORTED_GENDERS = {
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
+    # Fix for old db, add group_name
+    c.execute("PRAGMA table_info(messages)")
+    columns = [col[1] for col in c.fetchall()]
+    if 'group_name' not in columns:
+        try:
+            c.execute('ALTER TABLE messages ADD COLUMN group_name TEXT')
+        except Exception:
+            pass
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
-        user_id INTEGER, group_id INTEGER, group_name TEXT, username TEXT, msg_time INTEGER
+        user_id INTEGER, group_id INTEGER, username TEXT, group_name TEXT, msg_time INTEGER
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS usersettings (
         user_id INTEGER PRIMARY KEY,
         language TEXT DEFAULT 'en',
         gender TEXT DEFAULT 'unspecified'
     )''')
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_user_lang(user_id):
     conn = sqlite3.connect(DB)
@@ -70,7 +81,7 @@ def block_user(user_id, group_id, username, context=None, lang='en'):
         'hi': f"🚨 {username} बहुत ज्यादा संदेश भेज रहा है: 20 मिनट के लिए ब्लॉक किया गया।"
     }[lang]
     if context:
-        asyncio.create_task(context.bot.send_message(group_id, text))
+        context.bot.send_message(group_id, text)
 
 def count_messages_last(user_id, group_id, seconds=2):
     now = int(time.time())
@@ -83,7 +94,8 @@ def add_message(user_id, group_id, group_name, username):
     now = int(time.time())
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("INSERT INTO messages(user_id, group_id, group_name, username, msg_time) VALUES (?,?,?,?,?)", (user_id, group_id, group_name, username, now))
+    c.execute("INSERT INTO messages(user_id, group_id, username, group_name, msg_time) VALUES (?,?,?,?,?)",
+              (user_id, group_id, username, group_name, now))
     conn.commit(); conn.close()
 
 def get_group_stats_list(user_id, since=None):
@@ -157,36 +169,6 @@ def T(key, lang):
     }
     return texts[key][lang]
 
-async def safe_send_photo(bot, chat_id, photo, caption, reply_markup):
-    for _ in range(3):
-        try:
-            await bot.send_photo(
-                chat_id=chat_id,
-                photo=photo,
-                caption=caption,
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
-            return
-        except Exception as e:
-            await asyncio.sleep(1)
-    # fallback to text
-    await bot.send_message(chat_id, caption, reply_markup=reply_markup, parse_mode='HTML')
-
-async def safe_reply_photo(message, photo, caption, reply_markup):
-    for _ in range(3):
-        try:
-            await message.reply_photo(
-                photo=photo,
-                caption=caption,
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
-            return
-        except Exception:
-            await asyncio.sleep(1)
-    await message.reply_text(caption, reply_markup=reply_markup, parse_mode='HTML')
-
 async def smart_edit_caption_or_text(query, caption, reply_markup=None, parse_mode=None):
     if getattr(query.message, "photo", None):
         try:
@@ -195,8 +177,6 @@ async def smart_edit_caption_or_text(query, caption, reply_markup=None, parse_mo
             await query.edit_message_text(text=caption, reply_markup=reply_markup, parse_mode=parse_mode)
     else:
         await query.edit_message_text(text=caption, reply_markup=reply_markup, parse_mode=parse_mode)
-
-# ---------------- MENU HANDLERS ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
     user_id = update.effective_user.id if hasattr(update, 'effective_user') else update.message.from_user.id
@@ -209,7 +189,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwa
          InlineKeyboardButton("🔔 Updates", url=UPDATES_LINK)]
     ]
     markup = InlineKeyboardMarkup(keyboard)
-    await safe_reply_photo(update.message, START_PHOTO_URL, T("start_msg", lang), markup)
+    await update.message.reply_photo(
+        photo=START_PHOTO_URL,
+        caption=T("start_msg", lang),
+        reply_markup=markup
+    )
 
 async def start_callback(cbq, context):
     user_id = cbq.from_user.id
@@ -296,7 +280,6 @@ def stats_buttons(view):
     return InlineKeyboardMarkup(btns)
 
 async def stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='overall', query=None):
-    user_id = None
     if hasattr(update, 'message') and getattr(update, 'message', None):
         user_id = update.message.from_user.id
     elif getattr(update, "callback_query", None):
@@ -315,7 +298,9 @@ async def stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='o
     if query:
         await query.edit_message_media(InputMediaPhoto(START_PHOTO_URL, caption=msg, parse_mode='HTML'), reply_markup=markup)
     elif hasattr(update, "message") and update.message:
-        await safe_reply_photo(update.message, START_PHOTO_URL, msg, markup)
+        await update.message.reply_photo(
+            START_PHOTO_URL, caption=msg, reply_markup=markup, parse_mode='HTML'
+        )
 
 async def stats_buttons_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
@@ -327,7 +312,6 @@ async def stats_buttons_router(update: Update, context: ContextTypes.DEFAULT_TYP
         await stats_menu(update, context, 'week', query=update.callback_query)
 
 async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='overall', query=None):
-    user_id = None
     if hasattr(update, 'effective_user'):
         user_id = update.effective_user.id
     elif hasattr(update, "callback_query") and update.callback_query:
@@ -362,8 +346,10 @@ async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='over
     markup = InlineKeyboardMarkup(btns)
     if query:
         await query.edit_message_media(InputMediaPhoto(START_PHOTO_URL, caption=msg, parse_mode='HTML'), reply_markup=markup)
-    else:
-        await safe_reply_photo(update.message, START_PHOTO_URL, msg, markup)
+    elif hasattr(update, "message") and update.message:
+        await update.message.reply_photo(
+            START_PHOTO_URL, caption=msg, reply_markup=markup, parse_mode='HTML'
+        )
 
 async def lb_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
@@ -423,12 +409,13 @@ async def inline_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await lb_buttons(update, context)
 
 def main():
+    # Automatically try migration to handle old DB
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ranking", ranking_cmd))
-    app.add_handler(CommandHandler("yourstats", yourstats_cmd))
-    app.add_handler(CommandHandler("mytop", mytop_cmd))
+    app.add_handler(CommandHandler("mytop", yourstats_cmd))
+    app.add_handler(CommandHandler("my", mytop_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_counter))
     app.add_handler(CallbackQueryHandler(inline_router))
     print("Bot running. CTRL+C to stop.")
@@ -436,4 +423,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
