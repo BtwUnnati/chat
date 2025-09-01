@@ -6,8 +6,7 @@ from telegram import (
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler,
-    ContextTypes
+    ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 )
 from config import BOT_TOKEN, START_PHOTO_URL, SUPPORT_LINK, UPDATES_LINK
 
@@ -41,7 +40,7 @@ def get_user_lang(user_id):
     c.execute("SELECT language FROM usersettings WHERE user_id=?", (user_id,))
     row = c.fetchone()
     conn.close()
-    return row[0] if row and row[0] in SUPPORTED_LANGS else 'en'
+    return row if row and row in SUPPORTED_LANGS else 'en'
 
 def set_user_lang(user_id, lang):
     conn = sqlite3.connect(DB); c = conn.cursor()
@@ -54,7 +53,7 @@ def get_user_gender(user_id):
     c = conn.cursor()
     c.execute("SELECT gender FROM usersettings WHERE user_id=?", (user_id,))
     row = c.fetchone(); conn.close()
-    return row[0] if row and row[0] in SUPPORTED_GENDERS else 'unspecified'
+    return row if row and row in SUPPORTED_GENDERS else 'unspecified'
 
 def set_user_gender(user_id, gender):
     conn = sqlite3.connect(DB); c = conn.cursor()
@@ -79,7 +78,7 @@ def count_messages_last(user_id, group_id, seconds=2):
     now = int(time.time())
     conn = sqlite3.connect(DB); c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM messages WHERE user_id=? AND group_id=? AND msg_time>=?", (user_id, group_id, now-seconds))
-    count = c.fetchone()[0]
+    count = c.fetchone()
     conn.close(); return count
 
 def add_message(user_id, group_id, group_name, username):
@@ -126,7 +125,7 @@ def get_total_group_msgs(group_id, since=None):
         query += " AND msg_time >= ?"
         params.append(since)
     c.execute(query, params)
-    total = c.fetchone()[0]
+    total = c.fetchone()
     conn.close()
     return total
 
@@ -160,8 +159,17 @@ def T(key, lang):
     }
     return texts[key][lang]
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+async def smart_edit_caption_or_text(query, caption, reply_markup=None, parse_mode=None):
+    if getattr(query.message, "photo", None):
+        await query.edit_message_caption(caption=caption, reply_markup=reply_markup, parse_mode=parse_mode)
+    else:
+        await query.edit_message_text(text=caption, reply_markup=reply_markup, parse_mode=parse_mode)
+
+# MAIN MENUS
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+    # always Update object, never CallbackQuery
+    user_id = update.effective_user.id if hasattr(update, 'effective_user') else update.message.from_user.id
     lang = get_user_lang(user_id)
     keyboard = [
         [InlineKeyboardButton("➕ Add me in a group", url=f"https://t.me/{context.bot.username}?startgroup=true")],
@@ -177,14 +185,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=markup
     )
 
-async def smart_edit_caption_or_text(query, caption, reply_markup=None, parse_mode=None):
-    if getattr(query.message, "photo", None):
-        await query.edit_message_caption(caption=caption, reply_markup=reply_markup, parse_mode=parse_mode)
-    else:
-        await query.edit_message_text(text=caption, reply_markup=reply_markup, parse_mode=parse_mode)
+async def start_callback(cbq, context):
+    # start menu from callback
+    user_id = cbq.from_user.id
+    lang = get_user_lang(user_id)
+    keyboard = [
+        [InlineKeyboardButton("➕ Add me in a group", url=f"https://t.me/{context.bot.username}?startgroup=true")],
+        [InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
+         InlineKeyboardButton("🏆 Your stats", callback_data="yourstats_overall")],
+        [InlineKeyboardButton("❓ Support", url=SUPPORT_LINK),
+         InlineKeyboardButton("🔔 Updates", url=UPDATES_LINK)]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    await cbq.edit_message_media(
+        InputMediaPhoto(START_PHOTO_URL, caption=T("start_msg", lang), parse_mode='HTML'),
+        reply_markup=markup
+    )
+
+# SETTING MENUS
 
 async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = update.effective_user.id if hasattr(update, 'effective_user') else update.callback_query.from_user.id
     lang = get_user_lang(user_id)
     keyboard = [
         [InlineKeyboardButton("🌐 Language", callback_data="setlang"),
@@ -199,16 +220,15 @@ async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def setlang_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = update.callback_query.from_user.id
     lang = get_user_lang(user_id)
     btns = [[InlineKeyboardButton(v, callback_data="lang_"+k)] for k,v in SUPPORTED_LANGS.items()]
     btns.append([InlineKeyboardButton(T("back", lang), callback_data="settings")])
     msg = T("choose_lang", lang)
-    query = update.callback_query
-    await smart_edit_caption_or_text(query, msg, reply_markup=InlineKeyboardMarkup(btns))
+    await smart_edit_caption_or_text(update.callback_query, msg, reply_markup=InlineKeyboardMarkup(btns))
 
 async def set_gender_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = update.callback_query.from_user.id
     lang = get_user_lang(user_id)
     btns = [
         [InlineKeyboardButton(SUPPORTED_GENDERS['male'][lang], callback_data="gender_male"),
@@ -218,8 +238,7 @@ async def set_gender_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(T("back", lang), callback_data="settings")]
     ]
     msg = T("choose_gender", lang)
-    query = update.callback_query
-    await smart_edit_caption_or_text(query, msg, reply_markup=InlineKeyboardMarkup(btns))
+    await smart_edit_caption_or_text(update.callback_query, msg, reply_markup=InlineKeyboardMarkup(btns))
 
 async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cbq = update.callback_query
@@ -258,7 +277,12 @@ def stats_buttons(view):
     return InlineKeyboardMarkup(btns)
 
 async def stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='overall', query=None):
-    user_id = update.effective_user.id
+    # This function works for both /yourstats (command) and callback
+    user_id = None
+    if isinstance(update, Update) and getattr(update, 'message', None):
+        user_id = update.message.from_user.id
+    elif getattr(update, "callback_query", None):
+        user_id = update.callback_query.from_user.id
     lang = get_user_lang(user_id)
     gender = SUPPORTED_GENDERS[get_user_gender(user_id)][lang]
     since = _dt(mode)
@@ -272,7 +296,7 @@ async def stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='o
     markup = stats_buttons(mode)
     if query:
         await query.edit_message_media(InputMediaPhoto(START_PHOTO_URL, caption=msg, parse_mode='HTML'), reply_markup=markup)
-    else:
+    elif isinstance(update, Update) and getattr(update, 'message', None):
         await update.message.reply_photo(
             START_PHOTO_URL, caption=msg, reply_markup=markup, parse_mode='HTML'
         )
@@ -287,9 +311,16 @@ async def stats_buttons_router(update: Update, context: ContextTypes.DEFAULT_TYP
         await stats_menu(update, context, 'week', query=update.callback_query)
 
 async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='overall', query=None):
-    user_id = update.effective_user.id
+    user_id = None
+    if isinstance(update, Update):
+        try:
+            user_id = update.effective_user.id
+        except:
+            user_id = update.message.from_user.id
+    elif getattr(update, "callback_query", None):
+        user_id = update.callback_query.from_user.id
     lang = get_user_lang(user_id)
-    group_id = update.effective_chat.id
+    group_id = update.effective_chat.id if hasattr(update, "effective_chat") else update.callback_query.message.chat.id
     since = _dt(mode)
     board = get_leaderboard(group_id, since)
     total = get_total_group_msgs(group_id, since)
@@ -314,9 +345,10 @@ async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE, mode='over
     markup = InlineKeyboardMarkup(btns)
     if query:
         await query.edit_message_media(InputMediaPhoto(START_PHOTO_URL, caption=msg, parse_mode='HTML'), reply_markup=markup)
-    else:
+    elif isinstance(update, Update):
         await update.message.reply_photo(
-            START_PHOTO_URL, caption=msg, reply_markup=markup, parse_mode='HTML'
+            START_PHOTO_URL, caption=msg,
+            reply_markup=markup, parse_mode='HTML'
         )
 
 async def lb_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -332,6 +364,9 @@ async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ranking(update, context, mode='overall')
 
 async def yourstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await stats_menu(update, context, 'overall')
+
+async def mytop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await stats_menu(update, context, 'overall')
 
 async def message_counter(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -356,10 +391,10 @@ async def message_counter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def inline_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cbq = update.callback_query
     data = cbq.data
-    if data in ["settings"]:
+    if data == "settings":
         await settings_menu(update, context)
     elif data in ["back", "back_start"]:
-        await start(cbq, context)
+        await start_callback(cbq, context)
     elif data == "setlang":
         await setlang_menu(update, context)
     elif data == "gender_menu":
@@ -379,6 +414,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ranking", ranking_cmd))
     app.add_handler(CommandHandler("mytop", yourstats_cmd))
+    app.add_handler(CommandHandler("mytop", mytop_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_counter))
     app.add_handler(CallbackQueryHandler(inline_router))
     print("Bot running. CTRL+C to stop.")
