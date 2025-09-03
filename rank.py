@@ -320,9 +320,9 @@ async def inline_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ranking", ranking_cmd))
-    app.add_handler(CommandHandler("yourstats", yourstats_cmd))
+    app.add_handler(CommandHandler("dev", start))
+    app.add_handler(CommandHandler("rankings", ranking_cmd))
+    app.add_handler(CommandHandler("mytop", yourstats_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_counter))
     app.add_handler(CallbackQueryHandler(inline_router))
     print("Bot running.")
